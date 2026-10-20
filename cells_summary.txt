@@ -1,0 +1,231 @@
+=== CELL 0 (markdown) ===
+  # 🏪 Cerebal/Solari — Final Championship Notebook
+  ### Rossmann Store Sales 1st Place Solution (Gert Jacobusse) — Fully Adapted
+  
+  **PDF Source Confirmed Techniques:**
+  | Technique | Source Quote | Status |
+
+=== CELL 1 (markdown) ===
+  ## 📦 0. Package Check & Imports
+
+=== CELL 2 (code) ===
+  import subprocess, sys
+  for pkg in ['lightgbm', 'xgboost', 'catboost', 'seaborn', 'scipy']:
+      try:
+          __import__(pkg)
+          print(f'  ✓ {pkg}')
+
+=== CELL 3 (markdown) ===
+  ## 📂 1. Load Data
+
+=== CELL 4 (code) ===
+  train  = pd.read_csv(DATA_PATH + 'orders_train.csv')
+  test   = pd.read_csv(DATA_PATH + 'orders_test.csv')
+  meta   = pd.read_csv(DATA_PATH + 'hub_metadata.csv')
+  sample = pd.read_csv(DATA_PATH + 'sample_submission.csv')
+  
+
+=== CELL 5 (markdown) ===
+  ## ⚙️ 2. Feature Engineering
+  ### 2.1 Base Calendar + Metadata Features
+
+=== CELL 6 (code) ===
+  LOYALTY_MONTHS = {
+      'a': [1,4,7,10], 'b': [2,5,8,11], 'c': [3,6,9,12],
+      'd': [1,3,5,7,9,11], 'e': [2,4,6,8,10,12],
+  }
+  
+
+=== CELL 7 (markdown) ===
+  ### 2.2 🎯 PDF Feature: Hub-Level Ratio Aggregates
+  *"aggregates by store: ratio of sales during promotions/holidays/Saturdays, proportion school holidays, proportion of days open"*  
+  *— Gert Jacobusse, 1st Place Solution PDF*
+
+=== CELL 8 (code) ===
+  def add_hub_ratio_features(train_df, test_df):
+      """
+      Compute per-hub static ratio features from full training history.
+      These capture each hub's unique business profile:
+      - promo_sales_ratio:   how much MORE a hub sells during promotions vs normal days
+
+=== CELL 9 (markdown) ===
+  ### 2.3 🎯 PDF Feature: Hub Trend via Ridge Regression
+  *"fit a store specific linear model on 1) day number 2) day of week 3) promotions — use predicted slope as feature"*
+
+=== CELL 10 (code) ===
+  def add_hub_trend_features(train_df, test_df):
+      """
+      For each hub, fit a Ridge regression on the LAST YEAR of open-day sales,
+      using [day_number, weekday, promo_active] as regressors.
+      The fitted slope (coefficient on day_number) = hub's sales trend.
+
+=== CELL 11 (markdown) ===
+  ### 2.4 🎯 PDF Feature: Promo Distance (Day Counters)
+
+=== CELL 12 (code) ===
+  def add_promo_distance(train_df, test_df):
+      test_tmp = test_df.copy()
+      if 'OrderVolume' not in test_tmp.columns: test_tmp['OrderVolume'] = np.nan
+      full = pd.concat([
+          train_df[['HubID','Date','PromoActive']],
+
+=== CELL 13 (markdown) ===
+  ### 2.5 OpenAfterClosed — Pent-Up Demand
+
+=== CELL 14 (code) ===
+  def add_open_after_closed(train_df, test_df):
+      test_tmp = test_df.copy()
+      if 'OrderVolume' not in test_tmp.columns: test_tmp['OrderVolume'] = np.nan
+      full = pd.concat([
+          train_df[['HubID','Date','IsOpen']],
+
+=== CELL 15 (markdown) ===
+  ### 2.6 🎯 PDF Feature: YoY Lags + Rolling (lag 364/365/371)
+
+=== CELL 16 (code) ===
+  def add_lag_rolling_features(train_df, test_df):
+      test_tmp = test_df.copy()
+      if 'OrderVolume' not in test_tmp.columns: test_tmp['OrderVolume'] = np.nan
+      if 'AppSessions' not in test_tmp.columns: test_tmp['AppSessions'] = np.nan
+  
+
+=== CELL 17 (markdown) ===
+  ### 2.7 Target Encodings (OOF Hub, Hub×Weekday, Hub×Month)
+
+=== CELL 18 (code) ===
+  def oof_hub_target_encode(train_df, test_df, target='OrderVolume', n_splits=5):
+      train_sorted = train_df.sort_values('Date').copy()
+      oof_vals = np.zeros(len(train_sorted))
+      tscv = TimeSeriesSplit(n_splits=n_splits)
+      for _, (tr_idx, val_idx) in enumerate(tscv.split(train_sorted)):
+
+=== CELL 19 (markdown) ===
+  ### 2.8 Two-Stage: Predict AppSessions for Test
+
+=== CELL 20 (code) ===
+  def stage1_predict_appsessions(train_df, test_df):
+      drop_s1 = ['Date','OrderVolume','AppSessions',
+                  'CompetitorOpenSinceMonth','CompetitorOpenSinceYear',
+                  'LoyaltyProgramSinceWeek','LoyaltyProgramSinceYear',
+                  'LoyaltyProgramInterval','CompetitorDistance','Id','closed_streak']
+
+=== CELL 21 (markdown) ===
+  ### 2.9 Final Feature Matrix + NaN Diagnostics
+
+=== CELL 22 (code) ===
+  DROP_COLS = [
+      'Date','OrderVolume','AppSessions',
+      'CompetitorOpenSinceMonth','CompetitorOpenSinceYear',
+      'LoyaltyProgramSinceWeek','LoyaltyProgramSinceYear',
+      'LoyaltyProgramInterval','CompetitorDistance','Id','closed_streak',
+
+=== CELL 23 (markdown) ===
+  ## 📐 3. RMSLE + CV Setup
+
+=== CELL 24 (code) ===
+  def rmsle(y_true, y_pred):
+      y_pred = np.maximum(y_pred, 0)
+      return np.sqrt(np.mean((np.log1p(y_pred) - np.log1p(y_true)) ** 2))
+  
+  N_SPLITS = 5
+
+=== CELL 25 (markdown) ===
+  ## 🌲 4. LightGBM
+  *`feature_fraction=0.30` — PDF: "changed colsample_by_tree from 0.7 to 0.3 because I had a lot of features"*
+
+=== CELL 26 (code) ===
+  LGB_PARAMS = {
+      'objective': 'regression', 'metric': 'rmse',
+      'learning_rate'    : 0.02,
+      'num_leaves'       : 127,
+      'min_child_samples': 40,
+
+=== CELL 27 (code) ===
+  # Feature importance — Rossmann features highlighted in red
+  top30 = lgb_fi.sort_values(ascending=False).head(30)
+  rossmann_feats = {'vol_lag_364','vol_lag_365','vol_lag_371','vol_lag_728',
+                    'DaysSinceLastPromo','DaysUntilNextPromo','OpenAfterClosed',
+                    'ClosedDaysStreak','promo_sales_ratio','holiday_sales_ratio',
+
+=== CELL 28 (markdown) ===
+  ## 🚀 5. XGBoost (`colsample_bytree=0.30`)
+
+=== CELL 29 (code) ===
+  XGB_PARAMS = {
+      'objective'        : 'reg:squarederror',
+      'learning_rate'    : 0.02,
+      'max_depth'        : 7,
+      'n_estimators'     : 5000,
+
+=== CELL 30 (markdown) ===
+  ## 🐱 6. CatBoost
+
+=== CELL 31 (code) ===
+  CAT_FEATURES = [c for c in ['HubFormat','AssortmentTier','LoyaltyProgram',
+                                'IsOpen','PromoActive','RegionalHoliday','SchoolClosureFlag',
+                                'Weekday','IsWeekend','AnyHoliday','LoyaltyActiveMonth',
+                                'OpenAfterClosed','Quarter','IsSummer'] if c in FEATURE_COLS]
+  CB_PARAMS = {
+
+=== CELL 32 (markdown) ===
+  ## ☀️ 7. May–September Specialist LightGBM
+  *PDF: "separate models trained only on months May to September — they cover the test set months"*  
+  *Test period is June–July 2015, so a summer-specialist model is well-calibrated.*
+
+=== CELL 33 (code) ===
+  # Filter train to May-September rows (months 5-9) across all years
+  summer_mask = train_model_clean['Month'].isin([5,6,7,8,9])
+  X_summer    = X[summer_mask].reset_index(drop=True)
+  y_summer    = y[summer_mask].reset_index(drop=True)
+  y_raw_summer = y_raw[summer_mask]
+
+=== CELL 34 (markdown) ===
+  ## 🏆 8. Harmonic Mean Ensemble
+  *PDF: "for final ensembling I applied the harmonic mean"*  
+  *Harmonic mean stays conservative when models disagree — ideal for RMSLE which penalises over-prediction.*
+
+=== CELL 35 (code) ===
+  def weighted_harmonic_mean(preds_matrix, weights):
+      """
+      Compute weighted harmonic mean across models (columns).
+      preds_matrix: shape (n_samples, n_models)  — must be positive
+      weights:      shape (n_models,)
+
+=== CELL 36 (code) ===
+  # Compare arithmetic vs harmonic mean
+  arith_blend = oof_stack[covered_mask] @ weights
+  harm_blend  = oof_blend[covered_mask]
+  arith_score = rmsle(y_raw[covered_mask], arith_blend)
+  harm_score  = rmsle(y_raw[covered_mask], harm_blend)
+
+=== CELL 37 (markdown) ===
+  ## 🔧 9. Post-Processing: 0.985 Multiplier
+  *PDF (exact quote): "I should have applied the mathematical estimate of 0.985 to achieve a private leaderboard score well below 0.10"*
+
+=== CELL 38 (code) ===
+  multipliers = np.arange(0.96, 1.01, 0.001)
+  mult_scores = [rmsle(y_c, oof_c * m) for m in multipliers]
+  best_mult   = multipliers[np.argmin(mult_scores)]
+  best_mult_score = np.min(mult_scores)
+  
+
+=== CELL 39 (markdown) ===
+  ## 📤 10. Generate Submission
+
+=== CELL 40 (code) ===
+  # Apply optimal multiplier
+  test_blend_final = test_blend * best_mult
+  
+  # Zero out closed hubs (business rule: IsOpen=0 → always 0)
+  test_fe_reset = test_fe.reset_index(drop=True)
+
+=== CELL 41 (markdown) ===
+  ## 📊 11. Final Summary Dashboard
+
+=== CELL 42 (code) ===
+  rows = [
+      ('LightGBM (feature_frac=0.30)', lgb_oof),
+      ('XGBoost (colsample=0.30)',      xgb_oof),
+      ('CatBoost (rsm=0.30)',           cb_oof),
+      ('Summer Specialist',             summer_oof),
+
