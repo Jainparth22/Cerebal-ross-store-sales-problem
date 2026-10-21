@@ -1,0 +1,16 @@
+version: "3.8"
+
+services:
+  forecasting-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: solari-demand-forecasting:latest
+    container_name: solari_forecasting_service
+    ports:
+      - "8000:8000"
+    restart: unless-stopped
+    environment:
+      - PYTHONPATH=/app
+    volumes:
+      - ./artifacts:/app/artifacts
